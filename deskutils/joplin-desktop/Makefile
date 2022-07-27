@@ -1,11 +1,12 @@
-# $FreeBSD$
-
 PORTNAME=	joplin
 DISTVERSIONPREFIX=	v
-DISTVERSION=	1.7.11
+DISTVERSION=	2.9.1
 CATEGORIES=	deskutils
+MASTER_SITES=	LOCAL/mikael/joplin/:yarn \
+		LOCAL/mikael/joplin/:npm
 PKGNAMESUFFIX=	-desktop
-DISTFILES=	${PORTNAME}-node-modules-${DISTVERSION}${EXTRACT_SUFX}:prefetch
+DISTFILES=	joplin-${DISTVERSION}-yarn-cache.tar.gz:yarn \
+		joplin-${DISTVERSION}-npm-cache.tar.gz:npm
 
 MAINTAINER=	tagattie@FreeBSD.org
 COMMENT=	Note taking and to-do application with synchronisation capabilities
@@ -13,83 +14,66 @@ COMMENT=	Note taking and to-do application with synchronisation capabilities
 LICENSE=	MIT
 LICENSE_FILE=	${WRKSRC}/LICENSE
 
-FETCH_DEPENDS=	git:devel/git
 BUILD_DEPENDS=	app-builder:devel/app-builder \
-		rsync:net/rsync
-LIB_DEPENDS=	libvips.so:graphics/vips \
-		libsecret-1.so:security/libsecret
+		npm:www/npm-node16
+LIB_DEPENDS=	libopus.so:audio/opus \
+		libpci.so:devel/libpci \
+		libvips.so:graphics/vips
 
-USES=		desktop-file-utils electron:10 gmake gnome localbase:ldflags \
-		node:12,build python:build
+USES=		desktop-file-utils electron:18,build gl node:16,build python:3.7+,build xorg
 
 USE_GITHUB=	yes
 GH_ACCOUNT=	laurent22
 
-INSTALLS_ICONS=	yes
+USE_GL=		gl
+USE_NODE=	yarn
+USE_XORG=	x11 xcb xext xi
 
-SUB_FILES=	${PORTNAME}${PKGNAMESUFFIX}
-
-PORTDOCS=	BUILD.md CONTRIBUTING.md README.md SECURITY.md
-
-OPTIONS_DEFINE=	DOCS
-
-USE_NODE=	npm:fetch,build
-USE_ELECTRON=	extract prebuild build:builder
-
-PREFETCH_TIMESTAMP=	1613027575
+BINARY_ALIAS=	python=${PYTHON_CMD}
 
 BUILD_WRKSRC=	${WRKSRC}/packages/app-desktop
-
-pre-fetch:
-	if [ ! -f ${DISTDIR}/${PORTNAME}-node-modules-${DISTVERSION}${EXTRACT_SUFX} ]; then \
-		${MKDIR} ${WRKDIR}/npm-cache; \
-		${CP} -r ${FILESDIR}/packagejsons/* ${WRKDIR}/npm-cache; \
-		cd ${WRKDIR}/npm-cache && \
-			${SETENV} HOME=${WRKDIR} ${NPM_CMD} ci --ignore-scripts; \
-		cd ${WRKDIR}/npm-cache && \
-			${SETENV} HOME=${WRKDIR} ${NPX_CMD} lerna bootstrap --ignore-scripts --ci --concurrency 1; \
-		cd ${WRKDIR}/npm-cache/packages && \
-			for dir in *; do \
-				${RM} $${dir}/package.json $${dir}/package-lock.json; \
-			done; \
-		cd ${WRKDIR}/npm-cache && \
-			${RM} lerna.json package.json package-lock.json; \
-		${FIND} ${WRKDIR}/npm-cache -type d -exec ${CHMOD} 755 {} ';'; \
-		cd ${WRKDIR} && \
-		${MTREE_CMD} -cbnSp npm-cache | ${MTREE_CMD} -C | ${SED} \
-			-e 's:time=[0-9.]*:time=${PREFETCH_TIMESTAMP}.000000000:' \
-			-e 's:\([gu]id\)=[0-9]*:\1=0:g' \
-			-e 's:flags=.*:flags=none:' \
-			-e 's:^\.:./npm-cache:' > npm-cache.mtree && \
-		${TAR} -cz --options 'gzip:!timestamp' \
-			-f ${DISTDIR}/${PORTNAME}-node-modules-${DISTVERSION}${EXTRACT_SUFX} \
-			@npm-cache.mtree; \
-		${RM} -r ${WRKDIR}; \
-	fi
+APP_OUT_DIR=	linux-${ARCH:S/aarch64/arm64-/:S/amd64//}unpacked
 
 post-extract:
 .for dir in app-cli app-clipper app-mobile generator-joplin plugin-repo-cli plugins server
 	${RM} -r ${WRKSRC}/packages/${dir}
 .endfor
 
-pre-build:
-	cd ${WRKSRC} && ${SETENV} ${MAKE_ENV} ${NPM_CMD} run build
+do-build:
+# electron-builder is stupid and tries to open ${LOCALBASE}/share/electron19/electron with WRITE priv
+# copy ${LOCALBASE}/share/electron18 in WRKDIR
+# it's needed for the do-install phase, it's here because of this issue
+# https://github.com/MikaelUrankar/signal-desktop/issues/6 (I don't know why it fails though)
+	@${RM} -r ${WRKDIR}/electron${ELECTRON_VER_MAJOR}
+	@${CP} -pR ${LOCALBASE}/share/electron${ELECTRON_VER_MAJOR} ${WRKDIR}/electron${ELECTRON_VER_MAJOR}
+	${CHMOD} -R a+w ${WRKDIR}/electron${ELECTRON_VER_MAJOR}
+
+	cd ${WRKSRC}/packages/app-desktop && \
+		${SETENV} ${MAKE_ENV} ${YARN_CMD} install
 
 do-install:
-	${INSTALL_SCRIPT} ${WRKDIR}/${PORTNAME}${PKGNAMESUFFIX} ${STAGEDIR}${PREFIX}/bin
-	${INSTALL_DATA} ${FILESDIR}/${PORTNAME}${PKGNAMESUFFIX}.desktop \
-		${STAGEDIR}${PREFIX}/share/applications
-.for size in 16 24 32 48 72 96 128 144 256 512 1024
-	${MKDIR} ${STAGEDIR}${PREFIX}/share/icons/hicolor/${size}x${size}/apps
-	${INSTALL_DATA} ${BUILD_WRKSRC}/build/icons/${size}x${size}.png \
-		${STAGEDIR}${PREFIX}/share/icons/hicolor/${size}x${size}/apps/${PORTNAME}.png
-.endfor
-	${MKDIR} ${STAGEDIR}${DATADIR}
-	cd ${BUILD_WRKSRC}/dist/linux-unpacked && \
-		${COPYTREE_SHARE} resources ${STAGEDIR}${DATADIR}
+	cd ${WRKSRC}/packages/app-desktop && \
+		${SETENV} ${MAKE_ENV} ${PACKAGE_ENV} yarn run electron-builder \
+			--linux --dir --config.npmRebuild=false \
+			--config.electronVersion=${ELECTRON_VER_MAJOR} \
+			--config.electronDist=${WRKDIR}/electron${ELECTRON_VER_MAJOR}
 
-do-install-DOCS-on:
-	${MKDIR} ${STAGEDIR}${DOCSDIR}
-	${INSTALL_MAN} ${PORTDOCS:S|^|${WRKSRC}/|} ${STAGEDIR}${DOCSDIR}
+	${MKDIR} ${STAGEDIR}${DATADIR}
+	cd ${BUILD_WRKSRC}/dist/${APP_OUT_DIR} && \
+		${COPYTREE_SHARE} . ${STAGEDIR}${DATADIR}
+
+	${MKDIR} ${STAGEDIR}${PREFIX}/share/pixmaps
+	${INSTALL_DATA} ${WRKSRC}/packages/app-desktop/dist/linux-unpacked/resources/build/icons/512x512.png \
+		${STAGEDIR}${PREFIX}/share/pixmaps/joplin.png
+	${INSTALL_DATA} ${FILESDIR}/joplin.desktop \
+		${STAGEDIR}${PREFIX}/share/applications
+
+.for f in chromedriver mksnapshot v8_context_snapshot_generator
+	${RM} ${STAGEDIR}${DATADIR}/${f}
+.endfor
+	${RM} -r ${STAGEDIR}${DATADIR}/gen
+	${RM} -r ${STAGEDIR}${DATADIR}/node_headers
+	${MV} ${STAGEDIR}${DATADIR}/@joplinapp-desktop ${STAGEDIR}${DATADIR}/joplinapp-desktop
+	${RLN} ${STAGEDIR}${DATADIR}/joplinapp-desktop ${STAGEDIR}${PREFIX}/bin
 
 .include <bsd.port.mk>
